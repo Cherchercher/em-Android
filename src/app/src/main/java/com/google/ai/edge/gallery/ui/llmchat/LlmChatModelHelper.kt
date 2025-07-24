@@ -56,12 +56,18 @@ object LlmChatModelHelper {
     val accelerator =
       model.getStringConfigValue(key = ConfigKey.ACCELERATOR, defaultValue = Accelerator.GPU.label)
     Log.d(TAG, "Initializing...")
+    Log.d(TAG, "Model path: ${model.getPath(context = context)}")
+    Log.d(TAG, "Model name: ${model.name}")
+    Log.d(TAG, "Accelerator: $accelerator")
+    
     val preferredBackend =
       when (accelerator) {
         Accelerator.CPU.label -> LlmInference.Backend.CPU
         Accelerator.GPU.label -> LlmInference.Backend.GPU
         else -> LlmInference.Backend.GPU
       }
+    Log.d(TAG, "Preferred backend: $preferredBackend")
+    
     val optionsBuilder =
       LlmInference.LlmInferenceOptions.builder()
         .setModelPath(model.getPath(context = context))
@@ -69,11 +75,15 @@ object LlmChatModelHelper {
         .setPreferredBackend(preferredBackend)
         .setMaxNumImages(if (model.llmSupportImage) MAX_IMAGE_COUNT else 0)
     val options = optionsBuilder.build()
+    Log.d(TAG, "Options built successfully")
 
     // Create an instance of the LLM Inference task and session.
     try {
+      Log.d(TAG, "Creating LlmInference from options...")
       val llmInference = LlmInference.createFromOptions(context, options)
+      Log.d(TAG, "LlmInference created successfully")
 
+      Log.d(TAG, "Creating LlmInferenceSession...")
       val session =
         LlmInferenceSession.createFromOptions(
           llmInference,
@@ -88,11 +98,15 @@ object LlmChatModelHelper {
             )
             .build(),
         )
+      Log.d(TAG, "LlmInferenceSession created successfully")
       model.instance = LlmModelInstance(engine = llmInference, session = session)
+      Log.d(TAG, "Model instance set successfully")
     } catch (e: Exception) {
+      Log.e(TAG, "Failed to initialize model: ${e.message}", e)
       onDone(cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error"))
       return
     }
+    Log.d(TAG, "Initialization completed successfully")
     onDone("")
   }
 
@@ -165,6 +179,7 @@ object LlmChatModelHelper {
     images: List<Bitmap> = listOf(),
     audioClips: List<ByteArray> = listOf(),
   ) {
+    Log.d(TAG, "Starting inference for model '${model.name}' with input: '$input'")
     val instance = model.instance as LlmModelInstance
 
     // Set listener.
@@ -177,16 +192,20 @@ object LlmChatModelHelper {
     // For a model that supports image modality, we need to add the text query chunk before adding
     // image.
     val session = instance.session
+    Log.d(TAG, "Adding query chunk: '$input'")
     if (input.trim().isNotEmpty()) {
       session.addQueryChunk(input)
     }
     for (image in images) {
+      Log.d(TAG, "Adding image to session")
       session.addImage(BitmapImageBuilder(image).build())
     }
     for (audioClip in audioClips) {
       // Uncomment when audio is supported.
       // session.addAudio(audioClip)
     }
+    Log.d(TAG, "Starting async response generation")
     val unused = session.generateResponseAsync(resultListener)
+    Log.d(TAG, "Async response generation started")
   }
 }

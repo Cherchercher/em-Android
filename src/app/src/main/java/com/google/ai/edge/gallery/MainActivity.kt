@@ -16,18 +16,26 @@
 
 package com.google.ai.edge.gallery
 
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.ValueCallback
 import androidx.activity.ComponentActivity
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var server: EdgeAIHTTPServer? = null
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private val FILE_CHOOSER_REQUEST_CODE = 1001
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Log.d("EdgeAI", "onCreate called")
         super.onCreate(savedInstanceState)
 
         // Start the Edge AI HTTP server
@@ -49,6 +57,24 @@ class MainActivity : ComponentActivity() {
         WebView.setWebContentsDebuggingEnabled(true)
 
         webView!!.webViewClient = WebViewClient()
+        webView!!.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>,
+                fileChooserParams: WebChromeClient.FileChooserParams
+            ): Boolean {
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+                val intent = fileChooserParams.createIntent()
+                try {
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST_CODE)
+                } catch (e: Exception) {
+                    this@MainActivity.filePathCallback = null
+                    return false
+                }
+                return true
+            }
+        }
         webView!!.loadUrl("https://emr.nomadichacker.com/")
     }
 
@@ -62,6 +88,15 @@ class MainActivity : ComponentActivity() {
             webView?.goBack()
         } else {
             super.onBackPressed()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+            val result = WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+            filePathCallback?.onReceiveValue(result)
+            filePathCallback = null
         }
     }
 }

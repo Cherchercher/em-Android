@@ -38,5 +38,8 @@ class GalleryApplication : Application() {
     ThemeSettings.themeOverride.value = dataStoreRepository.readTheme()
 
     FirebaseApp.initializeApp(this)
+    
+    // Ensure only Gemma model is used
+    com.google.ai.edge.gallery.data.useOnlyGemmaModel()
   }
 }

@@ -26,6 +26,10 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.data.Config
+import com.google.ai.edge.gallery.data.ConfigKey
+import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.data.Accelerator
 
 /** Type of task. */
 enum class TaskType(val label: String, val id: String) {
@@ -69,6 +73,22 @@ data class Task(
   // The following fields are managed by the app. Don't need to set manually.
   var index: Int = -1,
   val updateTrigger: MutableState<Long> = mutableLongStateOf(0),
+)
+
+val MODEL_GEMMA3N_E4B_IT = Model(
+    name = "gemma3n_e4b_it", // Must match the file and the modelName used in requests
+    downloadFileName = "gemma3n_e4b_it.task",
+    url = "", // Local model, not downloaded
+    sizeInBytes = 0L, // Not used for local
+    configs = createLlmChatConfigs(
+        defaultMaxToken = 1024,
+        defaultTopK = 20, // Reduced for more factual output
+        defaultTopP = 0.8f, // Reduced for more conservative sampling
+        defaultTemperature = 0.2f, // Very low for maximum factual output
+        accelerators = listOf(Accelerator.CPU, Accelerator.GPU)
+    ), // Use proper LLM configuration
+    llmSupportImage = true, // Enable image support
+    imported = true // Mark as imported so getPath uses the correct path
 )
 
 val TASK_LLM_CHAT =
@@ -143,4 +163,18 @@ fun processTasks() {
       model.preProcess()
     }
   }
+}
+
+fun useOnlyGemmaModel() {
+    TASK_LLM_CHAT.models.clear()
+    TASK_LLM_CHAT.models.add(MODEL_GEMMA3N_E4B_IT)
+    TASK_LLM_PROMPT_LAB.models.clear()
+    TASK_LLM_PROMPT_LAB.models.add(MODEL_GEMMA3N_E4B_IT)
+    TASK_LLM_ASK_IMAGE.models.clear()
+    TASK_LLM_ASK_IMAGE.models.add(MODEL_GEMMA3N_E4B_IT)
+    TASK_LLM_ASK_AUDIO.models.clear()
+    TASK_LLM_ASK_AUDIO.models.add(MODEL_GEMMA3N_E4B_IT)
+    
+    // Ensure the model configuration is processed
+    MODEL_GEMMA3N_E4B_IT.preProcess()
 }

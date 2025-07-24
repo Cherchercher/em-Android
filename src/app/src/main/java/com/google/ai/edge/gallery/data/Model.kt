@@ -121,6 +121,10 @@ data class Model(
 
   fun getPath(context: Context, fileName: String = downloadFileName): String {
     if (imported) {
+      // Special case for gemma3n_e4b_it
+      if (name == "gemma3n_e4b_it") {
+        return "/data/local/tmp/llm/gemma3n_e4b_it.task"
+      }
       return listOf(context.getExternalFilesDir(null)?.absolutePath ?: "", fileName)
         .joinToString(File.separator)
     }
