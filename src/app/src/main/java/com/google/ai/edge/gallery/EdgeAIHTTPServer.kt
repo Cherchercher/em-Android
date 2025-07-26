@@ -23,6 +23,7 @@ import java.io.FileOutputStream
 import java.net.NetworkInterface
 import java.net.Inet4Address
 import java.security.MessageDigest
+import com.google.ai.edge.gallery.data.Model
 
 class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 12345) {
     
@@ -183,84 +184,87 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
                 response.addHeader("Access-Control-Allow-Headers", "origin, content-type, accept, authorization")
                 return response
             } else if (session.method == Method.POST && session.uri == "/edgeai_image") {
-                Log.d("EdgeAIHTTPServer", "/edgeai_image route called")
+                Log.d("EdgeAIHTTPServer", "/edgeai_image route called - Multi-step gallery-style processing (text-only structuring)")
                 val body = HashMap<String, String>()
                 session.parseBody(body)
                 val jsonString = body["postData"] ?: ""
                 Log.d("EdgeAIHTTPServer", "Request body: $jsonString")
                 val json = JSONObject(jsonString)
-                // Use a fixed default prompt regardless of what is sent
-                val prompt = "Extract all key information about the person in the picture, but only if they exist: gender, face_shape, hair_color, hair_length, hair_style, eye_color, skin_tone, height, build, top_clothing, bottom_clothing, accessories, distinctive_features, age_range. Return the result as a JSON object with these fields. Do not include fields that are not visible or cannot be determined. Do not add any extra text."
+                
+                // Get parameters
+                val customPrompt = json.optString("prompt", "Describe this image in detail.")
                 val modelName = json.optString("model", null)
                 val imageBase64 = json.getString("image")
-                // Log the first and last 100 characters of the base64 data for debugging
+                
+                // Log base64 data for debugging
                 val b64Preview = if (imageBase64.length > 200) {
                     imageBase64.take(100) + "..." + imageBase64.takeLast(100)
                 } else {
                     imageBase64
                 }
                 Log.d("EdgeAIHTTPServer", "Received base64 image data (preview): $b64Preview (length: ${imageBase64.length})")
+                
+                // Decode base64 to bitmap
                 val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
-                // Log SHA-256 hash of the image bytes
                 val digest = MessageDigest.getInstance("SHA-256")
                 val hash = digest.digest(imageBytes).joinToString("") { "%02x".format(it) }
                 Log.d("EdgeAIHTTPServer", "SHA-256 of decoded image bytes: $hash")
+                
                 val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                Log.d("EdgeAIHTTPServer", "Decoded image dimensions: ${bitmap.width}x${bitmap.height}")
-                // Resize bitmap to 256x256 for Gemma 3n
-                val resizedBitmap = Bitmap.createScaledBitmap(bitmap, 256, 256, true)
-                // Save bitmap to file
-                val filename = "img_${System.currentTimeMillis()}.png"
-                val file = File(context.filesDir, filename)
-                val outputStream = FileOutputStream(file)
-                resizedBitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-                outputStream.close()
-                
-                // Debug: Check file size and dimensions
-                Log.d("EdgeAIHTTPServer", "Saved image file size: ${file.length()} bytes")
-                Log.d("EdgeAIHTTPServer", "Resized bitmap dimensions: ${resizedBitmap.width}x${resizedBitmap.height}")
-                
-                // Generate URL
-                val imageUrl = "http://${getDeviceIpAddress()}:12345/images/$filename"
-                Log.d("EdgeAIHTTPServer", "Generated image URL: $imageUrl")
-                
-                // Verify the file exists and is accessible
-                if (file.exists()) {
-                    Log.d("EdgeAIHTTPServer", "Image file exists and is accessible: ${file.absolutePath}")
-                    Log.d("EdgeAIHTTPServer", "File size: ${file.length()} bytes")
-                } else {
-                    Log.e("EdgeAIHTTPServer", "Image file does not exist: ${file.absolutePath}")
+                if (bitmap == null) {
+                    Log.e("EdgeAIHTTPServer", "Failed to decode bitmap from base64 data")
+                    val responseJson = JSONObject()
+                    responseJson.put("text", "Error: Failed to decode image")
+                    val response = NanoHTTPD.newFixedLengthResponse(Status.BAD_REQUEST, "application/json", responseJson.toString())
+                    response.addHeader("Access-Control-Allow-Origin", "*")
+                    return response
                 }
-           
-                // Allow temperature and top_p to be set via request
-                val temperature = json.optDouble("temperature", Double.NaN)
-                val topP = json.optDouble("top_p", Double.NaN)
+                
+                Log.d("EdgeAIHTTPServer", "Successfully decoded bitmap: ${bitmap.width}x${bitmap.height}")
+                
+                // Get model
                 val model = if (modelName != null) getModelByName(modelName) else getDefaultLlmModel()
                 if (model == null) {
                     val responseJson = JSONObject()
                     responseJson.put("text", "No LLM model available")
                     val response = NanoHTTPD.newFixedLengthResponse(Status.OK, "application/json", responseJson.toString())
                     response.addHeader("Access-Control-Allow-Origin", "*")
-                    response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                    response.addHeader("Access-Control-Allow-Headers", "origin, content-type, accept, authorization")
                     return response
                 }
+                
+                // Log model configuration
+                Log.d("EdgeAIHTTPServer", "Using model: ${model.name}")
+                Log.d("EdgeAIHTTPServer", "Model supports image: ${model.llmSupportImage}")
+                Log.d("EdgeAIHTTPServer", "Model config: ${model.configValues}")
+                
+                // Allow temperature and top_p to be set via request
+                val temperature = json.optDouble("temperature", Double.NaN)
+                val topP = json.optDouble("top_p", Double.NaN)
+                val topK = json.optInt("topK", -1)
+                val maxTokens = json.optInt("maxTokens", -1)
+                
                 // Override config for this request if values provided
                 val mutableConfig = model.configValues.toMutableMap()
                 if (!temperature.isNaN()) mutableConfig["Temperature"] = temperature.toFloat()
                 if (!topP.isNaN()) mutableConfig["TopP"] = topP.toFloat()
+                if (topK != -1) mutableConfig["TopK"] = topK
+                if (maxTokens != -1) mutableConfig["MaxTokens"] = maxTokens
                 model.configValues = mutableConfig
-                // Step 1: Freeform description
-                val freeformPrompt = "Analyze the person in this image and describe their visible appearance. Focus only on what is clearly visible. Describe: clothing, age range, hair color/style, eye color, skin tone, build, and any distinctive features. Avoid guessing gender, race, or other uncertain attributes. If something is unclear or not visible, respond with \"unknown\". url:$imageUrl"
-                val freeformPromptOld = "Describe the person in the picture with as much detail as possible. url:$imageUrl"
-                val freeformResult = runLlmTextGen(freeformPrompt, modelName)
-                Log.d("EdgeAIHTTPServer", "Freeform description result: $freeformResult")
-
-                // Step 2: Structured extraction
-                val extractionPrompt = """Given the following description, extract all key information and return as a JSON object with these fields: gender, face_shape, hair_color, hair_length, hair_style, eye_color, skin_tone, height, build, top_clothing, bottom_clothing, accessories, distinctive_features, age_range. IMPORTANT: Only include fields that have clear, specific values. Do NOT include any fields that are "Not discernible", "avoided", "null", or similar uncertain values in the final JSON.\n\nDescription:\n$freeformResult"""
-                val structuredResult = runLlmTextGen(extractionPrompt, modelName)
-                Log.d("EdgeAIHTTPServer", "Structured extraction result: $structuredResult")
-
+                
+                Log.d("EdgeAIHTTPServer", "Updated model config: ${model.configValues}")
+                
+                // Step 1: Freeform description using gallery-style inference
+                val freeformPrompt = customPrompt
+                Log.d("EdgeAIHTTPServer", "Step 1: Freeform description with prompt: '$freeformPrompt'")
+                val freeformResult = runGalleryStyleInference(model, freeformPrompt, listOf(bitmap))
+                Log.d("EdgeAIHTTPServer", "Step 1 result: '$freeformResult'")
+                
+                // Step 2: Structured extraction using text-only inference
+                val extractionPrompt = """Given the following description, extract all key information and return as a JSON object with these fields: gender, face_shape, hair_color, hair_length, hair_style, eye_color, skin_tone, height, build, top_clothing, bottom_clothing, accessories, distinctive_features, age_range. IMPORTANT: Only include fields that have clear, specific values. Do NOT include any fields that are 'Not discernible', 'avoided', 'null', or similar uncertain values in the final JSON.\n\nDescription:\n$freeformResult"""
+                Log.d("EdgeAIHTTPServer", "Step 2: Structured extraction with prompt: '$extractionPrompt'")
+                val structuredResult = runGalleryStyleInference(model, extractionPrompt, listOf()) // No image for step 2
+                Log.d("EdgeAIHTTPServer", "Step 2 result: '$structuredResult'")
+                
                 val responseJson = JSONObject()
                 responseJson.put("text", structuredResult)
                 val response = NanoHTTPD.newFixedLengthResponse(Status.OK, "application/json", responseJson.toString())
@@ -282,6 +286,70 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
                 val workingPrompt = "$prompt url:$imageUrl"
                 Log.d("EdgeAIHTTPServer", "Using URL prompt format: '$workingPrompt'")
                 val result = runLlmTextGen(workingPrompt, modelName)
+                val responseJson = JSONObject()
+                responseJson.put("text", result)
+                val response = NanoHTTPD.newFixedLengthResponse(Status.OK, "application/json", responseJson.toString())
+                response.addHeader("Access-Control-Allow-Origin", "*")
+                response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                response.addHeader("Access-Control-Allow-Headers", "origin, content-type, accept, authorization")
+                return response
+            } else if (session.method == Method.POST && session.uri == "/edgeai_image_direct") {
+                Log.d("EdgeAIHTTPServer", "/edgeai_image_direct route called - Gallery-style processing")
+                val body = HashMap<String, String>()
+                session.parseBody(body)
+                val jsonString = body["postData"] ?: ""
+                Log.d("EdgeAIHTTPServer", "Request body: $jsonString")
+                val json = JSONObject(jsonString)
+                
+                // Get parameters like gallery app
+                val customPrompt = json.optString("prompt", "Describe this image in detail.")
+                val modelName = json.optString("model", null)
+                val imageBase64 = json.getString("image")
+                
+                // Log base64 data for debugging
+                val b64Preview = if (imageBase64.length > 200) {
+                    imageBase64.take(100) + "..." + imageBase64.takeLast(100)
+                } else {
+                    imageBase64
+                }
+                Log.d("EdgeAIHTTPServer", "Received base64 image data (preview): $b64Preview (length: ${imageBase64.length})")
+                
+                // Decode base64 to bitmap (like gallery app loads from URI)
+                val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
+                val digest = MessageDigest.getInstance("SHA-256")
+                val hash = digest.digest(imageBytes).joinToString("") { "%02x".format(it) }
+                Log.d("EdgeAIHTTPServer", "SHA-256 of decoded image bytes: $hash")
+                
+                val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                if (bitmap == null) {
+                    Log.e("EdgeAIHTTPServer", "Failed to decode bitmap from base64 data")
+                    val responseJson = JSONObject()
+                    responseJson.put("text", "Error: Failed to decode image")
+                    val response = NanoHTTPD.newFixedLengthResponse(Status.BAD_REQUEST, "application/json", responseJson.toString())
+                    response.addHeader("Access-Control-Allow-Origin", "*")
+                    return response
+                }
+                
+                Log.d("EdgeAIHTTPServer", "Successfully decoded bitmap: ${bitmap.width}x${bitmap.height}")
+                
+                // Get model like gallery app
+                val model = if (modelName != null) getModelByName(modelName) else getDefaultLlmModel()
+                if (model == null) {
+                    val responseJson = JSONObject()
+                    responseJson.put("text", "No LLM model available")
+                    val response = NanoHTTPD.newFixedLengthResponse(Status.OK, "application/json", responseJson.toString())
+                    response.addHeader("Access-Control-Allow-Origin", "*")
+                    return response
+                }
+                
+                // Log model configuration like gallery app
+                Log.d("EdgeAIHTTPServer", "Using model: ${model.name}")
+                Log.d("EdgeAIHTTPServer", "Model supports image: ${model.llmSupportImage}")
+                Log.d("EdgeAIHTTPServer", "Model config: ${model.configValues}")
+                
+                // Process like gallery app - direct bitmap inference
+                val result = runGalleryStyleInference(model, customPrompt, listOf(bitmap))
+                
                 val responseJson = JSONObject()
                 responseJson.put("text", result)
                 val response = NanoHTTPD.newFixedLengthResponse(Status.OK, "application/json", responseJson.toString())
@@ -378,8 +446,19 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
     }
 
     private fun runLlmTextImageGen(prompt: String, bitmap: Bitmap, modelName: String?): String {
+        Log.d("EdgeAIHTTPServer", "runLlmTextImageGen called with prompt: '$prompt'")
+        Log.d("EdgeAIHTTPServer", "Bitmap dimensions: ${bitmap.width}x${bitmap.height}")
+        Log.d("EdgeAIHTTPServer", "Bitmap config: ${bitmap.config}")
+        
         val model = if (modelName != null) getModelByName(modelName) else getDefaultLlmModel()
-        if (model == null) return "No LLM model available"
+        if (model == null) {
+            Log.e("EdgeAIHTTPServer", "No LLM model available")
+            return "No LLM model available"
+        }
+        
+        Log.d("EdgeAIHTTPServer", "Using model: ${model.name}")
+        Log.d("EdgeAIHTTPServer", "Model supports image: ${model.llmSupportImage}")
+        Log.d("EdgeAIHTTPServer", "Model config: ${model.configValues}")
         
         // Clean up any existing model instance to ensure fresh start
         try {
@@ -391,25 +470,41 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
         
         val latch = CountDownLatch(1)
         var resultText = ""
+        
+        Log.d("EdgeAIHTTPServer", "Initializing model for image inference...")
         LlmChatModelHelper.initialize(context, model) { err ->
             if (err.isNotEmpty()) {
+                Log.e("EdgeAIHTTPServer", "Model initialization failed: $err")
                 resultText = err
                 latch.countDown()
             } else {
-                LlmChatModelHelper.runInference(
-                    model,
-                    prompt,
-                    resultListener = { partial, done ->
-                        resultText = partial // Accumulate the complete response so far
-                        if (done) {
-                            latch.countDown()
-                        }
-                    },
-                    cleanUpListener = {},
-                    images = listOf(bitmap)
-                )
+                Log.d("EdgeAIHTTPServer", "Model initialized successfully, starting image inference")
+                try {
+                    LlmChatModelHelper.runInference(
+                        model,
+                        prompt,
+                        resultListener = { partial, done ->
+                            Log.d("EdgeAIHTTPServer", "Image inference result listener: partial='$partial', done=$done")
+                            resultText += partial // Accumulate the complete response so far
+                            if (done) {
+                                Log.d("EdgeAIHTTPServer", "Image inference completed with result: '$resultText'")
+                                latch.countDown()
+                            }
+                        },
+                        cleanUpListener = {
+                            Log.d("EdgeAIHTTPServer", "Image inference cleanUpListener called")
+                        },
+                        images = listOf(bitmap)
+                    )
+                } catch (e: Exception) {
+                    Log.e("EdgeAIHTTPServer", "Error during image inference: ${e.message}", e)
+                    resultText = "Error during inference: ${e.message}"
+                    latch.countDown()
+                }
             }
         }
+        
+        Log.d("EdgeAIHTTPServer", "Waiting for image inference to complete...")
         latch.await(900, TimeUnit.SECONDS)
         
         // Clean up after inference to prevent memory leaks
@@ -420,6 +515,7 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
             Log.e("EdgeAIHTTPServer", "Failed to clean up model after image inference: ${e.message}")
         }
         
+        Log.d("EdgeAIHTTPServer", "runLlmTextImageGen returning: '$resultText'")
         return resultText
     }
 
@@ -435,5 +531,77 @@ class EdgeAIHTTPServer(private val context: Context) : NanoHTTPD("0.0.0.0", 1234
             }
         }
         return "127.0.0.1"
+    }
+
+    // Gallery-style inference that mimics exactly how the gallery app processes images
+    private fun runGalleryStyleInference(model: Model, input: String, images: List<Bitmap>): String {
+        Log.d("EdgeAIHTTPServer", "runGalleryStyleInference called - mimicking gallery app")
+        Log.d("EdgeAIHTTPServer", "Input text: '$input'")
+        Log.d("EdgeAIHTTPServer", "Number of images: ${images.size}")
+        
+        // Log each image's properties
+        for ((index, image) in images.withIndex()) {
+            Log.d("EdgeAIHTTPServer", "Image $index: ${image.width}x${image.height}, config: ${image.config}")
+        }
+        
+        // Clean up any existing model instance to ensure fresh start (like gallery app)
+        try {
+            LlmChatModelHelper.cleanUp(model)
+            Log.d("EdgeAIHTTPServer", "Cleaned up existing model instance for gallery-style inference")
+        } catch (e: Exception) {
+            Log.e("EdgeAIHTTPServer", "Failed to clean up model for gallery-style inference: ${e.message}")
+        }
+        
+        val latch = CountDownLatch(1)
+        var resultText = ""
+        
+        // Initialize model like gallery app
+        LlmChatModelHelper.initialize(context, model) { err ->
+            if (err.isNotEmpty()) {
+                Log.e("EdgeAIHTTPServer", "Model initialization failed: $err")
+                resultText = "Model initialization failed: $err"
+                latch.countDown()
+            } else {
+                Log.d("EdgeAIHTTPServer", "Model initialized successfully, starting inference")
+                
+                // Run inference exactly like gallery app
+                try {
+                    LlmChatModelHelper.runInference(
+                        model = model,
+                        input = input,
+                        images = images,
+                        audioClips = listOf(), // No audio for this endpoint
+                        resultListener = { partialResult, done ->
+                            Log.d("EdgeAIHTTPServer", "Gallery-style result listener: partial='$partialResult', done=$done")
+                            resultText += partialResult // Accumulate the streaming response like gallery app
+                            if (done) {
+                                Log.d("EdgeAIHTTPServer", "Gallery-style inference completed with result: '$resultText'")
+                                latch.countDown()
+                            }
+                        },
+                        cleanUpListener = {
+                            Log.d("EdgeAIHTTPServer", "Gallery-style cleanUpListener called")
+                        }
+                    )
+                } catch (e: Exception) {
+                    Log.e("EdgeAIHTTPServer", "Error during gallery-style inference: ${e.message}", e)
+                    resultText = "Error during inference: ${e.message}"
+                    latch.countDown()
+                }
+            }
+        }
+        
+        // Wait for completion like gallery app
+        latch.await(900, TimeUnit.SECONDS)
+        
+        // Clean up after inference to prevent memory leaks (like gallery app)
+        try {
+            LlmChatModelHelper.cleanUp(model)
+            Log.d("EdgeAIHTTPServer", "Cleaned up model after gallery-style inference")
+        } catch (e: Exception) {
+            Log.e("EdgeAIHTTPServer", "Failed to clean up model after gallery-style inference: ${e.message}")
+        }
+        
+        return resultText
     }
 } 

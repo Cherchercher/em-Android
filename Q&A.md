@@ -88,27 +88,80 @@ This approach is **unusual** because:
 3. It works differently than expected
 4. Base64 doesn't work but URLs do
 
-This explains why it can accurately describe image content while not following the typical "image-capable model" pattern! 
+## How did we fix the empty results from the image endpoint?
 
-## Prompt Engineering Findings for LLMs with Vision
+### **The Problem**
+The original `/edgeai_image` endpoint was returning empty results despite:
+- ✅ Model file existing on device
+- ✅ Base64 image data being correctly decoded
+- ✅ HTTP server running properly
+- ✅ No obvious errors in logs
 
-### Short vs. Long Prompts
+### **Root Cause Analysis**
+After examining the successful gallery app implementation, we discovered the issue was in **how images were being processed**:
 
-**Finding:**
-Short, focused prompts (e.g., "Describe the person in the picture with as much detail as possible.") yield much better and more accurate results with LLMs and vision-language models than long, detailed prompts with templates and many instructions.
+#### **Original Implementation Issues:**
+1. **Wrong inference method**: Using `runLlmTextImageGen()` with complex two-step processing
+2. **Image resizing**: Resizing to 256x256 and saving to file (unnecessary complexity)
+3. **URL-based approach**: Converting bitmap to URL and using URL-based prompts
+4. **Over-complicated flow**: Multiple steps that could fail silently
 
-**Why?**
-- Long prompts with lots of formatting, templates, and rules can distract or confuse the model, causing it to default to generic, hallucinated, or empty outputs.
-- Including a full JSON template often leads the model to "fill in the blanks" with plausible values, even if they are not visible in the image.
-- Too many instructions (e.g., "if not visible, use unknown", "omit fields", etc.) can cause the model to play it safe and output "unknown" or skip fields, even when it could have made a reasonable guess.
-- LLMs with image support are still much better at text reasoning than vision; text-heavy prompts can bias the model toward language priors rather than actual image analysis.
+#### **Gallery App Implementation:**
+1. **Direct bitmap processing**: Pass `Bitmap` objects directly to `LlmChatModelHelper.runInference()`
+2. **Simple flow**: Single inference call with text + images
+3. **No resizing**: Use original bitmap dimensions
+4. **No file operations**: Everything stays in memory
 
-**Best Practices:**
-- Use concise, direct prompts for vision tasks.
-- If you want structured output, ask for a JSON object, but avoid including a full template unless necessary.
-- Avoid overloading the prompt with too many rules or formatting.
-- Test and iterate: add instructions incrementally and observe when output quality drops.
+### **The Solution**
+Created a new `/edgeai_image_direct` endpoint that **exactly mimics the gallery app's successful approach**:
 
-**Example:**
-- Good: `Describe the person in the picture with as much detail as possible.`
-- Less effective: (long JSON template with many rules and instructions) 
+#### **Key Changes:**
+1. **Direct bitmap inference**: Use `runGalleryStyleInference()` that calls `LlmChatModelHelper.runInference()` directly
+2. **No image resizing**: Pass original bitmap dimensions to the model
+3. **No file operations**: Keep everything in memory
+4. **Simple prompt handling**: Single prompt, no complex multi-step processing
+5. **Proper error handling**: Detailed logging at each step
+
+#### **Implementation Details:**
+```kotlin
+// Gallery-style inference that mimics exactly how the gallery app processes images
+private fun runGalleryStyleInference(model: Model, input: String, images: List<Bitmap>): String {
+    // Clean up existing model instance
+    LlmChatModelHelper.cleanUp(model)
+    
+    // Initialize model
+    LlmChatModelHelper.initialize(context, model) { err ->
+        if (err.isEmpty()) {
+            // Run inference exactly like gallery app
+            LlmChatModelHelper.runInference(
+                model = model,
+                input = input,
+                images = images,  // Direct bitmap objects
+                audioClips = listOf(),
+                resultListener = { partialResult, done ->
+                    // Accumulate streaming response
+                }
+            )
+        }
+    }
+}
+```
+
+### **Why This Works**
+1. **Matches gallery app**: Uses identical code path as successful gallery implementation
+2. **Proper model initialization**: Ensures model is ready for image processing
+3. **Direct bitmap handling**: No intermediate conversions or file operations
+4. **Streaming response**: Handles partial results correctly
+5. **Memory management**: Proper cleanup prevents resource leaks
+
+### **Results**
+- ✅ **Working image analysis**: Returns detailed, accurate descriptions
+- ✅ **Consistent with gallery app**: Same processing approach
+- ✅ **Reliable**: No more empty results
+- ✅ **Debuggable**: Detailed logging at each step
+
+### **Key Insight**
+The issue wasn't with the model or the image data - it was with **how we were calling the inference engine**. By copying the exact pattern from the working gallery app, we achieved the same successful results.
+
+### **Migration Path**
+The original `/edgeai_image` endpoint can now be refactored to use the gallery-style approach, providing a more reliable and consistent image analysis experience. 
